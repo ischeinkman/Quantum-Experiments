@@ -8,7 +8,7 @@ implicit none
     REAL*8, parameter :: hbar = 1.054571800D-34!J * s
 
     ! Constants of this simulation
-    Integer, parameter :: timesize = 100, xsize = 1000, ysize = 1000 ! Universe size
+    Integer, parameter :: timesize = 200, xsize = 1000, ysize = 1000 ! Universe size
     COMPLEX * 16, dimension(timesize, xsize, ysize) :: data ! The universe itself
 
     REAL*8, parameter :: s = 20D-4 ! time step, seconds
@@ -28,6 +28,8 @@ implicit none
     REAL*8 :: x, y, t ! Temp variables for converting from the index
     REAL*8 :: curV ! Temp variable for the potential at a point
     COMPLEX*16 :: psi_coeff, psiV_coeff, psi_off_coeff ! Coefficients for the iterator
+
+    Integer :: acc_big, acc_small
     
     do xind = 1,xsize
         x = (xind - 1) * d - 1.0
@@ -38,6 +40,8 @@ implicit none
         end do
         !$omp end parallel do
     end do
+
+    call normalize_matrix(data(1, :, :))
 
     Print *, "Finished t = ", 0, " step"
     
@@ -51,6 +55,8 @@ implicit none
         end do
         !$omp end parallel do
     end do
+
+    call normalize_matrix(data(2, :, :))
 
     Print *, "Finished t = ", 1, " step"
 
@@ -73,14 +79,18 @@ implicit none
             end do
             !$omp end parallel do
         end do
+        call normalize_matrix(data(tind, :, :))
         Print *, "Finished t = ", tind -1, " step"
     end do 
+
     
-    open(fd, file="Simulationdata.csv")
 
     ! Write the data to a disk
     ! To save space we only write the non-zero data, not the entire 
     ! universe at every time point
+    
+    open(fd, file="Simulationdata.csv")
+
     do tind = 1, timesize
         do xind = 1,xsize
             do yind = 1,ysize
@@ -106,10 +116,17 @@ contains
         REAL * 8 :: coeff_val
         COMPLEX*16 :: exp_val
 
-        coeff_val = sqrt(sigma *  sqrt(pi))
-        exp_val = (px * x + py * y) * (0, 1.0)/hbar - (x * x + y * y)/(2 * sigma * sigma) 
+        !coeff_val = sqrt(sigma *  sqrt(pi))
+        !exp_val = (px * x + py * y) * (0, 1.0)/hbar - (x * x + y * y)/(2 * sigma * sigma) 
 
-        psi_at_point = coeff_val * exp(exp_val)
+        !psi_at_point = coeff_val * exp(exp_val)
+
+        if (x .eq. 0 .and. y .eq. 0) then 
+            psi_at_point = 1
+        else 
+            psi_at_point = 0
+        end if
+
         
     end function start_wave_packet
 
@@ -232,4 +249,73 @@ contains
 
     end function iterate_psi_at_point
 
+    subroutine normalize_matrix(matrix)
+        COMPLEX*16, intent(inout), dimension(:, :) :: matrix
+
+        INTEGER, dimension(2) :: dims
+        REAL*8 :: sum_squares, old_sum
+
+        dims = SHAPE(matrix)
+        sum_squares = 0.0
+
+        ! Get the normalization coefficient at that time
+        do xind = 1, dims(1)
+            do yind = 1, dims(2)
+                old_sum = sum_squares
+                sum_squares = sum_squares + 1D100 * custom_abs(matrix(xind, yind))**2
+            end do
+        end do
+        
+        sum_squares = sum_squares /1D100
+
+        ! Short Circuit on a bad universe
+        if (sum_squares .eq. 0) then
+            Print *, "Bad universe. " 
+            return 
+        else if(abs(sum_squares - 1) .lt. 0.0001) then
+            Print *, "SPICY! Sumsq = ", sum_squares
+        end if
+        
+        ! Get the normalization coefficient at that time
+        do xind = 1, dims(1)
+            do yind = 1, dims(2)
+                matrix(xind, yind) = matrix(xind, yind) / sqrt(sum_squares)
+            end do
+        end do
+
+    end subroutine 
+
+    pure function custom_abs(inpval) result(retval)
+        Complex*16, intent(in) :: inpval
+        Real*8 :: retval 
+        
+        Real*8 :: realpart, imgpart
+        Real*8 :: expn
+
+
+        retval = abs(inpval)
+        if (retval .ne. 0 .or. inpval .eq. 0) then
+            return
+        end if
+
+        realpart = REAL(inpval)
+        imgpart = IMAG(inpval)
+
+        if (realpart .eq. 0) then
+            retval = abs(imgpart)
+            return 
+        else if (imgpart .eq. 0) then
+            retval = abs(realpart)
+            return
+        end if
+
+        expn = 1D1 ** (-1 * LOG10(realpart))
+
+        if (expn .ne. expn .or. expn .eq. 0) then 
+            expn = 1D1**200
+        end if
+
+        retval = abs(inpval * expn) /expn
+
+    end function    
 end program main
