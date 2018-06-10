@@ -29,8 +29,6 @@ implicit none
     REAL*8 :: curV ! Temp variable for the potential at a point
     COMPLEX*16 :: psi_coeff, psiV_coeff, psi_off_coeff ! Coefficients for the iterator
 
-    Integer :: acc_big, acc_small
-    
     do xind = 1,xsize
         x = (xind - 1) * d - 1.0
         !$omp parallel do default(shared) private(y, yind)
@@ -82,8 +80,6 @@ implicit none
         call normalize_matrix(data(tind, :, :))
         Print *, "Finished t = ", tind -1, " step"
     end do 
-
-    
 
     ! Write the data to a disk
     ! To save space we only write the non-zero data, not the entire 
