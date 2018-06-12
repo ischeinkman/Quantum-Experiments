@@ -2,17 +2,9 @@
 module Wave_Packet_Simulation
 
     use iso_fortran_env, only : REAL64
+    use Wavefunc_DataStorage
     use omp_lib
     implicit none
-    !private 
-    !public::start_wave_packet, first_iteration_at_point, iterate_psi_at_point, &
-    !        calc_psi_coeff, calc_psiOff_coeff, calc_psiV_coeff, normalize_matrix, &
-    !        custom_abs, DataPoint
-
-    type DataPoint
-        REAL(kind=REAL64) :: t, x, y
-        COMPLEX(kind=REAL64) :: value
-    end type DataPoint
 
     contains
 
@@ -188,190 +180,6 @@ module Wave_Packet_Simulation
 
     end subroutine 
 
-    ! A custom complex absolute value function for dealing with small numbers
-    elemental function custom_abs(inpval) result(retval)
-        Complex(kind=REAL64), intent(in) :: inpval
-        Real(kind=REAL64) :: retval 
-        
-        Real(kind=REAL64) :: realpart, imgpart
-        Real(kind=REAL64) :: expn
-
-
-        retval = abs(inpval)
-        if (retval .ne. 0 .or. inpval .eq. 0) then
-            return
-        end if
-
-        realpart = REAL(inpval)
-        imgpart = AIMAG(inpval)
-
-        if (realpart .eq. 0) then
-            retval = abs(imgpart)
-            return 
-        else if (imgpart .eq. 0) then
-            retval = abs(realpart)
-            return
-        end if
-
-        expn = 1D1 ** (-1 * LOG10(realpart))
-
-        if (expn .ne. expn .or. expn .eq. 0) then 
-            expn = 1D1**200
-        end if
-
-        retval = abs(inpval * expn) /expn
-
-    end function    
-
-    ! Store the truncated universe data
-    subroutine store_data(storage, data, t, d, xmin, ymin, max_points)
-        type(DataPoint), dimension(0:), intent(inout) :: storage
-        REAL(kind=REAL64), intent(in) :: t, d, xmin, ymin
-        INTEGER, intent(in) :: max_points
-        COMPLEX(kind=REAL64), dimension(:, :), intent(in) :: data
-
-        Integer, dimension(1) :: storage_dims
-        Integer, dimension(2) :: data_dims 
-        Integer :: storage_offset, stidx, xidx, yidx
-        REAL(kind=REAL64) :: x, y
-        
-        storage_dims = shape(storage)
-        data_dims = shape(data)
-
-        storage_offset = NINT(storage(0)%x)
-
-        stidx = storage_offset 
-
-        !$OMP Parallel do default(shared) private(xidx, yidx, x, y)
-        do xidx = 1, data_dims(1)
-
-            ! Is the array filled?
-            if (storage(0)%t .ne. 0) then 
-                cycle
-            end if
-
-            ! Did it get filled but we errored? 
-            if (storage(0)%x .ge. storage_dims(1) -1) then 
-                !$OMP critical (set_end_flag_header)
-                storage(0)%t = 1
-                !$OMP end critical (set_end_flag_header)
-                cycle
-            end if
-
-            do yidx = 1, data_dims(2)
-
-                ! Is the array filled?
-                if (storage(0)%t .ne. 0) then 
-                    exit
-                end if
-
-                ! Did it get filled but we errored? 
-                if (storage(0)%x .ge. storage_dims(1) -1) then 
-                    !$OMP critical (set_end_flag_header)
-                    storage(0)%t = 1
-                    !$OMP end critical (set_end_flag_header)
-                    exit
-                end if
-
-                ! Store data
-                if(data(xidx, yidx) .ne. 0) then
-
-                    
-                    ! Construct the positional points
-                    x = d * (xidx - 1) + xmin
-                    y = d * (yidx - 1) + ymin
-
-                    ! Did we hit the per-limit cap?
-                    if (max_points .gt. 0 .and. stidx - storage_offset .ge. max_points) then
-                        !$OMP Critical (swap_min_lock)
-                        call swap_min(storage,storage_offset, stidx, DataPoint(t, x, y, data(xidx, yidx)))
-                        !$OMP End Critical (swap_min_lock)
-                        cycle
-                    end if
-                    
-                    !$OMP Critical (store_data)
-
-                    ! Store it
-                    storage(stidx) = DataPoint(t, x, y, data(xidx, yidx))
-                    stidx = stidx + 1
-
-                    ! Check if we reached the limits
-                    if ( stidx + 1 .ge. storage_dims(1)) then
-                        storage(0)%t = 1
-                    else if ( max_points .gt. 0 .and. stidx - storage_offset .ge. max_points) then
-                        Print *, "Hit max points at time: ", t
-                        Print *, "Now switching to min swap between points ", storage_offset, " and ", stidx
-                    end if
-
-                    !$OMP End critical (store_data)
-                end if
-            end do
-        end do
-        !$OMP end parallel do
-
-        storage(0)%x = stidx 
-    end subroutine 
-
-    subroutine swap_min(subarray, begin, end, ndata)
-        type(DataPoint), dimension(:), intent(inout) :: subarray
-        Integer, intent(in) :: begin, end
-        type(DataPoint), intent(in) :: ndata
-
-        Integer :: minIdx, thread_min_idx, dataidx, per_thread_count
-        Integer :: num_threads, cur_thread, start_idx, end_idx
-        Integer, allocatable, dimension(:) :: min_per_thread
-
-        if (ndata%value  .eq. 0) then 
-            return 
-        end if
-
-        !$OMP Parallel default(shared) 
-        if (omp_get_thread_num() .eq. 0) then
-            num_threads = omp_get_num_threads()
-        end if
-        !$OMP end parallel
-        
-        allocate(min_per_thread(num_threads))
-        per_thread_count = (end - begin)/num_threads
-
-
-        !$OMP Parallel default(shared) private(dataidx, cur_thread, start_idx, end_idx, thread_min_idx)
-        cur_thread = omp_get_thread_num()
-
-        start_idx = begin + cur_thread * num_threads
-        if(cur_thread .eq. num_threads - 1) then
-            end_idx = end
-        else 
-            end_idx = begin + (cur_thread + 1) * num_threads
-        end if
-
-        thread_min_idx = start_idx
-
-        do dataidx = start_idx + 1, end_idx
-            if (custom_abs(subarray(thread_min_idx)%value) .gt. custom_abs(subarray(dataidx)%value)) then
-                thread_min_idx = dataidx
-            end if
-        end do
-
-        min_per_thread(cur_thread + 1) = thread_min_idx
-        !$OMP END Parallel
-
-        minIdx = min_per_thread(1)
-
-        do cur_thread = 2, num_threads 
-            if (custom_abs(subarray(minIdx)%value) .lt. custom_abs(subarray(min_per_thread(cur_thread))%value)) then
-                minIdx = min_per_thread(cur_thread)
-            end if
-        end do 
-
-        if(custom_abs(subarray(minIdx)%value) .lt. custom_abs(ndata%value)) then
-            subarray(minIdx) = ndata
-        end if
-
-        deallocate(min_per_thread)
-
-    end subroutine
-
 end module Wave_Packet_Simulation
 
 program main
@@ -387,7 +195,8 @@ program main
     ! Constants of this simulation
 
     ! Data storage variables
-    Integer, parameter :: timesize = 2000, points_per_time = 100000, storage_sz = points_per_time * timesize
+    type(DataStore) ::  storage
+    Integer, parameter :: timesize = 200, points_per_time = 100000, storage_sz = points_per_time * timesize
     Integer, parameter :: max_points = 400000
     Integer, parameter :: xsize = 1000, ysize = 1000 ! Universe size
     COMPLEX(kind=REAL64), dimension(:, :), allocatable, target :: universe_a, universe_b, universe_c ! The closest time slices
@@ -395,10 +204,8 @@ program main
 
     ! Universe bounds
     REAL(kind=REAL64), parameter :: xmin = -1.0, xmax = 1.0, ymin = -1.0, ymax = 1.0
-    REAL(kind=REAL64), parameter :: tmax = 5.0
-
-
-    type(DataPoint), dimension(:), allocatable :: storage
+    REAL(kind=REAL64), parameter :: tmax = 1.0
+    REAL(kind=REAL64), parameter :: min_percent = 1D-6
 
 
     REAL(kind=REAL64), parameter :: s = (tmax)/timesize ! time step, seconds
@@ -418,8 +225,12 @@ program main
     REAL(kind=REAL64) :: x, y, t ! Temp variables for converting from the index
     REAL(kind=REAL64) :: curV ! Temp variable for the potential at a point
     COMPLEX(kind=REAL64) :: psi_coeff, psiV_coeff, psi_off_coeff ! Coefficients for the iterator
+    type(TimeNode), pointer :: data_idx
+    
+    storage%size = 0
+    Nullify(storage%head)
+    Nullify(storage%tail)
 
-    allocate(storage(0:storage_sz))
     allocate(universe_a(xsize, ysize))
     allocate(universe_b(xsize, ysize))
     allocate(universe_c(xsize, ysize))
@@ -429,9 +240,6 @@ program main
              " over a region of [",xmin, ", ", xmin + d*xsize, "] x [", ymin, ", ", ymin + d*ysize, &
              "] with steps of ", d
 
-    storage(0:) = DataPoint(0, 0, 0, (0, 0))
-    storage(0) = DataPoint(0, 1, 0, (0, 0))
-    
     tmp_ptr => universe_a
     prev_data => universe_a ! The universe at time t+s
     curr_data => universe_b ! The universe at time t
@@ -449,9 +257,9 @@ program main
     !$omp end parallel do
 
     call normalize_matrix(prev_data)
-    call store_data(storage, prev_data, 0D0, d, xmin, ymin, max_points)
+    call store_data(storage, prev_data, 0D0, d, xmin, ymin, max_points, min_percent)
 
-    Print *, "Finished t = ", 0, " step"
+    Print *, "Finished t = ", 0, " step with ", storage%size, " total points."
     
     !$omp parallel do default(shared) private(x, y, xind, yind, curV)
     do xind = 1,xsize
@@ -466,16 +274,17 @@ program main
 
     call normalize_matrix(curr_data)
 
-    call store_data(storage, curr_data, s, d, xmin, ymin, max_points)
+    call store_data(storage, curr_data, s, d, xmin, ymin, max_points, min_percent)
 
-    Print *, "Finished t = ", 1, " step"
+    Print *, "Finished t = ", 1, " step with ", storage%size, " total points."
 
     psi_coeff = calc_psi_coeff(m, hbar, s, d)
     psiV_coeff = calc_psiV_coeff(m, hbar, s, d)
     psi_off_coeff = calc_psiOff_coeff(m, hbar, s, d)
     
     tind = 3
-    do while(NINT(storage(0)%t) .eq. 0 .and. t .lt. tmax)
+    t = s
+    do while(storage%size .le. storage_sz .and. t .lt. tmax)
         t = (tind - 1) * s
 
         !$omp parallel do default(shared) private(x, y, xind, yind, curV)
@@ -493,12 +302,14 @@ program main
         !$omp end parallel do
 
         call normalize_matrix(next_data)
-        call store_data(storage, next_data, t, d, xmin, ymin, max_points)
+        call store_data(storage, next_data, t, d, xmin, ymin, max_points, min_percent)
         tmp_ptr => prev_data
         prev_data => curr_data
         curr_data => next_data
         next_data => tmp_ptr
-        Print *, "Finished t = ", tind -1, " step"
+        if(MOD(tind-1, 100) .eq. 0) then 
+            Print *, "Finished t = ", tind-1, " step with ", storage%size, " total data points."
+        end if
         tind = tind + 1
     end do 
 
@@ -508,21 +319,24 @@ program main
     
     open(fd, file="Simulationdata.csv")
 
-    do xind = 1, storage_sz
-        if(storage(xind)%value .eq. 0) then
-            exit 
-        end if 
-        Write (fd, *) storage(xind)%t, ", ", &
-                      storage(xind)%x, ", ", &
-                      storage(xind)%y, ", ", &
-                      real(storage(xind)%value), ",", &
-                      aimag(storage(xind)%value)
+
+
+    data_idx => storage%head
+    do while(ASSOCIATED(data_idx))
+
+        do xind = 1, size(data_idx%data)
+            Write (fd, *) data_idx%t, ", ", &
+                        data_idx%data(xind)%x, ", ", &
+                        data_idx%data(xind)%y, ", ", &
+                        real(data_idx%data(xind)%value), ",", &
+                        aimag(data_idx%data(xind)%value)
+        end do 
+        data_idx => data_idx%next 
     end do
 
     deallocate(universe_a)
     deallocate(universe_b)
     deallocate(universe_c)
-    deallocate(storage)
 
     contains
 
